@@ -37,7 +37,6 @@
 #include <utility>
 #include <vector>
 
-#include <stdio.h>
 // Defining expressions for AST evaluation is currently a bit tedious, so we
 // define some standard nodes here that can be easily reused elsewhere.
 namespace {

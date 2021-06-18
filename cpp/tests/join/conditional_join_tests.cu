@@ -243,6 +243,48 @@ struct ConditionalJoinPairReturnTest : public ConditionalJoinTest<T> {
       thrust::device, result_pairs.begin(), result_pairs.end(), reference_pairs.begin()));
   }
 
+  void compare_to_hash_join_null(
+    std::vector<std::pair<std::vector<T>, std::vector<bool>>> left_data,
+    std::vector<std::pair<std::vector<T>, std::vector<bool>>> right_data)
+  {
+    // Note that we need to maintain the column wrappers otherwise the
+    // resulting column views will be referencing potentially invalid memory.
+    auto [left_wrappers, right_wrappers, left_columns, right_columns, left, right] =
+      this->parse_input(left_data, right_data);
+    // TODO: Generalize this to support multiple columns by automatically
+    // constructing the appropriate expression.
+    auto result    = this->join(left, right, left_zero_eq_right_zero);
+    auto reference = this->reference_join(left, right);
+
+    thrust::device_vector<thrust::pair<cudf::size_type, cudf::size_type>> result_pairs(
+      result.first->size());
+    thrust::device_vector<thrust::pair<cudf::size_type, cudf::size_type>> reference_pairs(
+      reference.first->size());
+
+    thrust::transform(thrust::device,
+                      result.first->begin(),
+                      result.first->end(),
+                      result.second->begin(),
+                      result_pairs.begin(),
+                      [] __device__(cudf::size_type first, cudf::size_type second) {
+                        return thrust::make_pair(first, second);
+                      });
+    thrust::transform(thrust::device,
+                      reference.first->begin(),
+                      reference.first->end(),
+                      reference.second->begin(),
+                      reference_pairs.begin(),
+                      [] __device__(cudf::size_type first, cudf::size_type second) {
+                        return thrust::make_pair(first, second);
+                      });
+
+    thrust::sort(thrust::device, result_pairs.begin(), result_pairs.end());
+    thrust::sort(thrust::device, reference_pairs.begin(), reference_pairs.end());
+
+    EXPECT_TRUE(thrust::equal(
+      thrust::device, result_pairs.begin(), result_pairs.end(), reference_pairs.begin()));
+  }
+
   /**
    * This method must be implemented by subclasses for specific types of joins.
    * It should be a simply forwarding of arguments to the appropriate cudf
@@ -444,6 +486,44 @@ TYPED_TEST(ConditionalInnerJoinTest, TestOneColumnOneNullNoNullJoin)
                    left_zero_eq_right_zero,
                    {{1, 0}, {2, 2}},
                    cudf::null_equality::UNEQUAL);
+};
+
+TYPED_TEST(ConditionalInnerJoinTest, TestCompareNullJoin)
+{
+  this->compare_to_hash_join_null({{{0, 1, 2, 3}, {0, 1, 1, 0}}}, {{{1, 0, 2, 4}, {1, 1, 1, 0}}});
+};
+
+TYPED_TEST(ConditionalInnerJoinTest, TestCompareRandomToHashNulls)
+{
+  unsigned int N           = 10000;
+  unsigned int num_repeats = 10;
+  unsigned int num_unique  = N / num_repeats;
+
+  std::vector<TypeParam> left(N);
+  std::vector<TypeParam> right(N);
+
+  for (unsigned int i = 0; i < num_repeats; ++i) {
+    std::iota(
+      std::next(left.begin(), num_unique * i), std::next(left.begin(), num_unique * (i + 1)), 0);
+    std::iota(
+      std::next(right.begin(), num_unique * i), std::next(right.begin(), num_unique * (i + 1)), 0);
+  }
+
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::shuffle(left.begin(), left.end(), gen);
+  std::shuffle(right.begin(), right.end(), gen);
+
+  // generate validity mask
+  std::vector<bool> left_valid(N);
+  std::vector<bool> right_valid(N);
+
+  std::transform(left.begin(), left.end(), left_valid.begin(), [](auto i) { return not(i % 2); });
+
+  std::transform(
+    right.begin(), right.end(), right_valid.begin(), [](auto i) { return not(i % 3); });
+
+  this->compare_to_hash_join_null({{left, left_valid}}, {{right, right_valid}});
 };
 
 /**
